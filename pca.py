@@ -1,0 +1,79 @@
+from scipy.sparse import load_npz, vstack, csr_matrix
+from sklearn.decomposition import IncrementalPCA
+from sklearn.preprocessing import StandardScaler
+import pandas as pd
+import os
+import numpy as np
+
+# Parameters
+input_dir = "/scratch/project_2005213/druv/projects/unmapped_wgs/backup/unmapped_wgs/res/contigs/kmers/processed_kmers"
+output_pca_csv = "pca_results_50_nofin.csv"
+output_variance_csv = "explained_variance_50_nofin.csv"
+n_components = 50
+batch_size = 1000  # Adjust based on memory capacity
+
+# Step 1: Load matrices and align dimensions
+print("Loading k-mer matrices and collecting global k-mer set...")
+kmer_matrices = []
+global_kmer_set = set()
+breed_labels = []
+
+for file in os.listdir(input_dir):
+    if file.endswith(".npz"):
+        breed = file.split("_")[0]
+        print(f"Loading {file} for breed {breed}")
+        
+        matrix = load_npz(os.path.join(input_dir, file))
+        kmer_matrices.append((matrix, breed))  # Store the matrix and its breed
+        breed_labels.extend([breed] * matrix.shape[0])
+        global_kmer_set.update(range(matrix.shape[1]))
+
+global_kmer_count = max(global_kmer_set) + 1
+aligned_matrices = []
+
+for matrix, breed in kmer_matrices:
+    if matrix.shape[1] < global_kmer_count:
+        extra_columns = global_kmer_count - matrix.shape[1]
+        aligned_matrix = csr_matrix((matrix.data, matrix.indices, matrix.indptr), shape=(matrix.shape[0], global_kmer_count))
+    else:
+        aligned_matrix = matrix
+    aligned_matrices.append(aligned_matrix)
+
+combined_matrix = vstack(aligned_matrices)
+
+# Step 2: Normalize the data
+print("Normalizing data...")
+scaler = StandardScaler(with_mean=False)
+normalized_matrix = scaler.fit_transform(combined_matrix)
+
+# Step 3: Perform Incremental PCA
+print(f"Performing Incremental PCA with {n_components} components...")
+ipca = IncrementalPCA(n_components=n_components)
+
+# Step 3.1: Train Incremental PCA in batches
+for i in range(0, normalized_matrix.shape[0], batch_size):
+    batch = normalized_matrix[i:i + batch_size].toarray()  # Convert to dense
+    ipca.partial_fit(batch)
+
+# Step 3.2: Transform data in batches
+principal_components = []
+for i in range(0, normalized_matrix.shape[0], batch_size):
+    batch = normalized_matrix[i:i + batch_size].toarray()  # Convert to dense
+    principal_components.append(ipca.transform(batch))
+
+principal_components = np.vstack(principal_components)  # Combine all batches
+
+# Step 4: Save PCA results
+print("Saving PCA results...")
+pca_df = pd.DataFrame(principal_components, columns=[f"PC{i+1}" for i in range(n_components)])
+pca_df["Breed"] = breed_labels
+pca_df.to_csv(output_pca_csv, index=False)
+
+# Step 5: Save explained variance
+print("Saving explained variance...")
+explained_variance = pd.DataFrame({
+    "Principal Component": [f"PC{i+1}" for i in range(len(ipca.explained_variance_ratio_))],
+    "Explained Variance Ratio": ipca.explained_variance_ratio_,
+    "Cumulative Variance": ipca.explained_variance_ratio_.cumsum()
+})
+explained_variance.to_csv(output_variance_csv, index=False)
